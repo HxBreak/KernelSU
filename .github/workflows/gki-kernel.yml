@@ -37,7 +37,7 @@ on:
       use_cache:
         required: false
         type: boolean
-        default: true
+        default: false
       embed_ksud:
         required: false
         type: string
@@ -159,56 +159,6 @@ jobs:
           echo "[+] Add KernelSU symbols"
           cat $KSU_ROOT/kernel/export_symbol.txt | awk '{sub("[ \t]+","");print "  "$0}' >> $SYMBOL_LIST
 
-      - name: Setup ccache
-        if: inputs.use_cache == true
-        uses: hendrikmuhs/ccache-action@v1
-        with:
-          key: gki-kernel-aarch64-${{ inputs.version_name }}
-          max-size: 2G
-          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Setup for LKM
-        if: ${{ inputs.build_lkm == true }}
-        working-directory: android-kernel
-        run: |
-          pip install ast-grep-cli
-          sudo apt-get install llvm-15 -y
-          ast-grep -U -p '$$$ check_exports($$$) {$$$}' -r '' common/scripts/mod/modpost.c
-          ast-grep -U -p 'check_exports($$$);' -r '' common/scripts/mod/modpost.c
-          sed -i '/config KSU/,/help/{s/default y/default m/}' common/drivers/kernelsu/Kconfig
-          echo "drivers/kernelsu/kernelsu.ko" >> common/android/gki_aarch64_modules
-
-          # bazel build, android14-5.15, android14-6.1 use bazel
-          if [ ! -e build/build.sh ]; then
-            sed -i 's/needs unknown symbol/Dont abort when unknown symbol/g' build/kernel/*.sh || echo "No unknown symbol scripts found"
-            if [ -e common/modules.bzl ]; then
-              sed -i 's/_COMMON_GKI_MODULES_LIST = \[/_COMMON_GKI_MODULES_LIST = \[ "drivers\/kernelsu\/kernelsu.ko",/g' common/modules.bzl
-            fi
-          else
-            TARGET_FILE="build/kernel/build.sh"
-            if [ ! -e "$TARGET_FILE" ]; then
-              TARGET_FILE="build/build.sh"
-            fi
-            sed -i 's/needs unknown symbol/Dont abort when unknown symbol/g' $TARGET_FILE || echo "No unknown symbol in $TARGET_FILE"
-            sed -i 's/if ! diff -u "\${KERNEL_DIR}\/\${MODULES_ORDER}" "\${OUT_DIR}\/modules\.order"; then/if false; then/g' $TARGET_FILE
-            sed -i 's@${ROOT_DIR}/build/abi/compare_to_symbol_list@echo@g' $TARGET_FILE
-            sed -i 's/needs unknown symbol/Dont abort when unknown symbol/g' build/kernel/*.sh || echo "No unknown symbol scripts found"
-          fi
-
-      - name: Make working directory clean to avoid dirty
-        working-directory: android-kernel
-        run: |
-          # Fix bazel build error
-          if [ -f common/BUILD.bazel ]; then
-            [ -f android/abi_gki_protected_exports_aarch64 ] || sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' common/BUILD.bazel
-          fi
-          
-          rm common/android/abi_gki_protected_exports_* || echo "No protected exports!"
-          git config --global user.email "bot@kernelsu.org"
-          git config --global user.name "KernelSUBot"
-          cd common/ && git add -A && git commit -a -m "Add KernelSU"
-          repo status
-
       - name: Build Kernel/LKM
         working-directory: android-kernel
         run: |
@@ -221,6 +171,9 @@ jobs:
           else
             tools/bazel run --disk_cache=/home/runner/.cache/bazel --config=fast --config=stamp --lto=thin //common:kernel_aarch64_dist -- --dist_dir=dist
           fi
+          cd common
+          git status
+          cd -
 
       - name: Prepare artifacts
         id: prepareArtifacts
@@ -230,6 +183,7 @@ jobs:
             OUTDIR=android-kernel/dist
           fi
           mkdir output
+          cp $OUTDIR/boot.img ./output/
           if [ "${{ inputs.build_lkm}}" = "true" ]; then 
             llvm-strip-15 -d $OUTDIR/kernelsu.ko
             mv $OUTDIR/kernelsu.ko ./output/${{ inputs.version }}_kernelsu.ko
@@ -248,16 +202,3 @@ jobs:
           name: Image-${{ inputs.version_name }}_${{ inputs.os_patch_level }}
           path: ./output/*
 
-      - name: Upload AnyKernel3
-        if: ${{ inputs.build_lkm == false }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: AnyKernel3-${{ inputs.version_name }}_${{ inputs.os_patch_level }}
-          path: ./AnyKernel3/*
-
-      - name: Upload LKM
-        uses: actions/upload-artifact@v4
-        if: ${{ inputs.build_lkm == true }}
-        with:
-          name: ${{ inputs.version }}-lkm
-          path: ./output/*_kernelsu.ko
